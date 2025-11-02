@@ -12,46 +12,47 @@
 
 
 // --- SPI pins for VSPI (default) ---
-contexspr int spi_sclk_pin 18;
-contexspr int miso_pin 19;
-contexspr int mosi_pin 23;
-contexspr int icm20948_cs_pin 5;  // Chip‐select for ICM-20948
+constexpr int spi_sclk_pin 18;
+constexpr int miso_pin 19;
+constexpr int mosi_pin 23;
+constexpr int icm20948_cs_pin 5;  // Chip‐select for ICM-20948
 
 
-contexspr int status_led_pin = 17;
+constexpr int status_led_pin = 17;
 
 // --- Reaction‐wheel ESC on GPIO0 ---
-contexspr int reaction_wheel_pin = 0;
-contexspr int reaction_wheel_freq = 50;  // 50 Hz for typical ESC PWM
-contexspr int reaction_wheel_resolution  = 16;   // 16-bit PWM resolution
+constexpr int reaction_wheel_pin = 0;
+constexpr int reaction_wheel_freq = 50;  // 50 Hz for typical ESC PWM
+constexpr int reaction_wheel_resolution  = 16;   // 16-bit PWM resolution
 
 
 // --- TVC servos on two GPIOs ---
 Servo servoX, servoY;
-contexspr int servo_x_pin = 33;
-contexspr int servo_y_pin = 32;
+constexpr int servo_x_pin = 33;
+constexpr int servo_y_pin = 32;
 
 // Leg Servo
 Servo leg_servo;
-contexspr int leg_servo_pin = 15;
+constexpr int leg_servo_pin = 15;
 bool legs_triggered = false;
 
-int trigger_time;
+// takes in millis(), which gives an unsigned long.
+unsigned long trigger_time = 0;
 
 
 // --- PID constants for reaction wheel (yaw rate) ---
-contexspr float  Kp_rw = 3.3125f, Ki_rw = 0.2f, Kd_rw = 1.3f;
+constexpr float  Kp_rw = 3.3125f, Ki_rw = 0.2f, Kd_rw = 1.3f;
 float prevError_rw = 0.0f, integral_rw = 0.0f;
 unsigned long rw_prev_time_micros  = 0;
 
 
 // --- PID constants for TVC (roll/pitch) ---
-contexspr float Kp_tvc = 1.5f;
-contexspr float Ki_tvc = 0.1f;
-contexspr float Kd_tvc = 0.05f;  // START VERY LOW (e.g., 0.0) AND TUNE UP
-contexspr float tvc_time_step_target = 0.01f;
-contexspr float tvc_deadzone = 1.0f;
-contexspr float lpf_beta = 0.2f;
+constexpr float Kp_tvc = 1.5f;
+constexpr float Ki_tvc = 0.1f;
+constexpr float Kd_tvc = 0.05f;  // START VERY LOW (e.g., 0.0) AND TUNE UP
+constexpr float tvc_time_step_target = 0.01f;
+constexpr float tvc_deadzone = 1.0f;
+constexpr float lpf_beta = 0.2f;
 
 
 // Variables for the LPF-based TVC PID
@@ -274,7 +275,8 @@ void setup() {
  tvc_prev_time_micros = micros();
  rw_prev_time_micros  = micros();
 
- trigger_time = 3000 + millis();
+ // trigger_time is an unsigned long.
+ trigger_time = millis() + 3000UL;
 
  Serial.println("Setup complete.");
 }
@@ -345,7 +347,7 @@ if ( (fifoStatus == ICM_20948_Stat_Ok     ||
    }
 
 
-   if (tvc_in_limp_mode && fabs(current_roll_lpf) < tvc_reset_angle_limit && fabs(current_pitch_lpf) < TVC_RESET_ANGLE_LIMIT) {
+   if (tvc_in_limp_mode && fabs(current_roll_lpf) < tvc_reset_angle_limit && fabs(current_pitch_lpf) < tvc_reset_angle_limit) {
      Serial.println("TVC Exiting LIMP MODE: Angles back in range.");
      tvc_in_limp_mode = false;
      // PID state (integrals, prev_errors) will naturally rebuild on next active PID cycle
@@ -434,14 +436,15 @@ if ( (fifoStatus == ICM_20948_Stat_Ok     ||
    // Serial.println("Reaction Wheel Neutral due to TVC Limp Mode.");
  }
 
-//  fire the 2nd motor
- if ((millis() - last_motor_time >= trigger_time) && !legs_triggered) {
+ // Fixed timing bug: previously mixed micros() and millis() and timing was wrong.
+// Now uses millis() + 3000UL to trigger once, exactly 3 seconds after setup.
+ if (!legs_triggered && millis() >= trigger_time) {
    legs_triggered = true;
    triggerMotor();
-   last_motor_time = loop_start_micros;
-   // fire leg actuators
+  // fire leg actuators
    triggerLegs();
  }
+
 
 
 
