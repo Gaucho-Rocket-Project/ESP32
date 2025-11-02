@@ -36,7 +36,8 @@ Servo leg_servo;
 contexspr int leg_servo_pin = 15;
 bool legs_triggered = false;
 
-int trigger_time;
+// takes in millis(), which gives an unsigned long.
+unsigned long trigger_time = 0;
 
 
 // --- PID constants for reaction wheel (yaw rate) ---
@@ -274,7 +275,8 @@ void setup() {
  tvc_prev_time_micros = micros();
  rw_prev_time_micros  = micros();
 
- trigger_time = 3000 + millis();
+ // trigger_time is an unsigned long.
+ trigger_time = millis() + 3000UL;
 
  Serial.println("Setup complete.");
 }
@@ -345,7 +347,7 @@ if ( (fifoStatus == ICM_20948_Stat_Ok     ||
    }
 
 
-   if (tvc_in_limp_mode && fabs(current_roll_lpf) < tvc_reset_angle_limit && fabs(current_pitch_lpf) < TVC_RESET_ANGLE_LIMIT) {
+   if (tvc_in_limp_mode && fabs(current_roll_lpf) < tvc_reset_angle_limit && fabs(current_pitch_lpf) < tvc_reset_angle_limit) {
      Serial.println("TVC Exiting LIMP MODE: Angles back in range.");
      tvc_in_limp_mode = false;
      // PID state (integrals, prev_errors) will naturally rebuild on next active PID cycle
@@ -434,14 +436,15 @@ if ( (fifoStatus == ICM_20948_Stat_Ok     ||
    // Serial.println("Reaction Wheel Neutral due to TVC Limp Mode.");
  }
 
-//  fire the 2nd motor
- if ((millis() - last_motor_time >= trigger_time) && !legs_triggered) {
+ // Fixed timing bug: previously mixed micros() and millis() and timing was wrong.
+// Now uses millis() + 3000UL to trigger once, exactly 3 seconds after setup.
+ if (!legs_triggered && millis() >= trigger_time) {
    legs_triggered = true;
    triggerMotor();
-   last_motor_time = loop_start_micros;
-   // fire leg actuators
+  // fire leg actuators
    triggerLegs();
  }
+
 
 
 
