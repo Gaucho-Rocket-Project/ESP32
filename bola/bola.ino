@@ -389,6 +389,9 @@ void setup() {
 
     current_roll_lpf = lpf(current_roll_lpf, current_roll_raw, lpf_beta);
     current_pitch_lpf = lpf(current_pitch_lpf, current_pitch_raw, lpf_beta);
+
+    sum_r += current_roll_lpf;
+    sum_y += current_pitch_lpf;
   }
    delay(10);
  }
