@@ -7,6 +7,9 @@
 #include <vector>
 #include <array>  // added for lookup table
 #include "BluetoothSerial.h"
+#include <Wifi.h>
+#include <Wire.h>
+#include <esp_now.h>
 
 // --- SPI pins for VSPI (default) ---
 constexpr int spi_sclk_pin 18;
@@ -69,10 +72,13 @@ bool tvc_in_limp_mode = false;
 ICM_20948_SPI imu;
 
 // --- IMU data ---
-int16_t acceleration[3];
-float euler_angles[3];
-uint8_t pressure[3];
-uint8_t temperature[3];
+struct imu_data{
+  int16_t acceleration[3];
+  float euler_angles[3];
+  uint8_t pressure[3];
+  uint8_t temperature[3];
+} data;
+
 
 
 // --- Bias offsets ---
@@ -83,6 +89,9 @@ float roll_bias = 0, pitch_bias = 0;
 BluetoothSerial SerialBT;
 char bt_Cmd;
 bool launch_sequence = false;  // main logic flag
+
+//ESP-NOW
+unint8_t ground_station[6] = {0x7C, 0x9E, 0xBD, 0x12, 0x34, 0x56}; //dummy address
 
 
 // MoI Consts
@@ -95,15 +104,28 @@ unsigned long last_motor_time = 0,
              motor_interval = 1000;  // ms between motor triggers
 
 
+//
+
+
 //COMMUNICATION FUNCTIONS:
-//void sendTelemetry(){}
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("Send Status: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+}
+
+void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len){
+  if(*mac == ground_station && len >= 1){
+    esp_now_send(receiverAddress, (uint8_t *)&data, sizeof(data));
+  } 
+}
+
 void readIMU() {
   icm_20948_DMP_data_t dmp_data;
   if(imu.readDMPDataFromFIFO(&dmp_data) == ICM_20948_Stat_Ok){
     if(dmp_data.header == DMP_header_bitmap_Accel){
-      acceleration[0] = dmp_data.Raw_Accel.X;
-      acceleration[1] = dmp_data.Raw_Accel.Y;
-      acceleration[2] = dmp_data.Raw_Accel.Z;
+      data.acceleration[0] = dmp_data.Raw_Accel.X;
+      data.acceleration[1] = dmp_data.Raw_Accel.Y;
+      data.acceleration[2] = dmp_data.Raw_Accel.Z;
     }
     else if(dmp_data.header == DMP_header_bitmap_Quat6){
       double q1 = static_cast<double>(dmp_data.Quat6.Data.Q1) / 1073741824.0;  // X-axis rotation component
@@ -129,14 +151,13 @@ void readIMU() {
 
       float yaw = atan2(2 * (q0*q3 + q1*q2), 1 - 2*(q2*q2 + q3*q3));
 
-      euler_angles[0] = roll;
-      euler_angles[1] = pitch;
-      euler_angles[2] = yaw;   
+      data.euler_angles[0] = roll;
+      data.euler_angles[1] = pitch;
+      data.euler_angles[2] = yaw;   
      }
     else if(dmp_data.header == DMP_header_bitmap_Pressure){
-      uint8_t raw_barometer_data[6] = dmp_data.Pressure;
-      memcpy(pressure, raw_barometer_data, 3);
-      memcpy(temperature, raw_barometer_data+3, 3);
+      memcpy(data.pressure, dmp_data.Pressure, 3);
+      memcpy(data.temperature, dmp_data.Pressure+3, 3);
     }
   }
 }
@@ -153,32 +174,31 @@ void triggerMotor(){
 }
 void tvcCycle(){
     // 1) TVC control using DMP Game Rotation Vector
- icm_20948_DMP_data_t dmp_data;
+  icm_20948_DMP_data_t dmp_data;
  
- ICM_20948_Status_e fifoStatus = imu.readDMPdataFromFIFO(&dmp_data);
+  ICM_20948_Status_e fifoStatus = imu.readDMPdataFromFIFO(&dmp_data);
 
-if ( (fifoStatus == ICM_20948_Stat_Ok     || 
-      fifoStatus == ICM_20948_Stat_FIFOMoreDataAvail) &&
-     (dmp_data.header & DMP_header_bitmap_Quat6) )
-{
-   double q1 = static_cast<double>(dmp_data.Quat6.Data.Q1) / 1073741824.0;  // X-axis rotation component
-   double q2 = static_cast<double>(dmp_data.Quat6.Data.Q2) / 1073741824.0;  // Y-axis rotation component
-   double q3 = static_cast<double>(dmp_data.Quat6.Data.Q3) / 1073741824.0;  // Z-axis rotation component
-
-
-   double q_sum_sq = q1 * q1 + q2 * q2 + q3 * q3;
-   double q0 = (q_sum_sq < 1.0) ? sqrt(1.0 - q_sum_sq) : 0.0;
+  if ( (fifoStatus == ICM_20948_Stat_Ok     || 
+        fifoStatus == ICM_20948_Stat_FIFOMoreDataAvail) &&
+      (dmp_data.header & DMP_header_bitmap_Quat6) ) {
+    double q1 = static_cast<double>(dmp_data.Quat6.Data.Q1) / 1073741824.0;  // X-axis rotation component
+    double q2 = static_cast<double>(dmp_data.Quat6.Data.Q2) / 1073741824.0;  // Y-axis rotation component
+    double q3 = static_cast<double>(dmp_data.Quat6.Data.Q3) / 1073741824.0;  // Z-axis rotation component
 
 
-   // ---- CHOOSE AND USE ONLY ONE EULER ANGLE CONVERSION ----
-   // Standard Euler Angle Convention (Confirm your IMU axis mapping to Roll/Pitch vehicle axes)
-   // Roll (around IMU X-axis / vehicle's longitudinal axis)
-   double t0_roll = 2.0 * (q0 * q1 + q2 * q3);
-   double t1_roll = 1.0 - 2.0 * (q1 * q1 + q2 * q2);
-   float current_roll_raw = atan2(t0_roll, t1_roll) * (180.0 / PI) + 90;
+    double q_sum_sq = q1 * q1 + q2 * q2 + q3 * q3;
+    double q0 = (q_sum_sq < 1.0) ? sqrt(1.0 - q_sum_sq) : 0.0;
 
 
-   // Pitch (around IMU Y-axis)
+    // ---- CHOOSE AND USE ONLY ONE EULER ANGLE CONVERSION ----
+    // Standard Euler Angle Convention (Confirm your IMU axis mapping to Roll/Pitch vehicle axes)
+    // Roll (around IMU X-axis / vehicle's longitudinal axis)
+    double t0_roll = 2.0 * (q0 * q1 + q2 * q3);
+    double t1_roll = 1.0 - 2.0 * (q1 * q1 + q2 * q2);
+    float current_roll_raw = atan2(t0_roll, t1_roll) * (180.0 / PI) + 90;
+
+
+    // Pitch (around IMU Y-axis)
     double t2_pitch = (2.0 * (q0 * q2 - q3 * q1))*-1.0;
     t2_pitch = constrain(t2_pitch, -1.0, 1.0);
     float current_pitch_raw = asin(t2_pitch) * (180.0 / PI);
@@ -187,24 +207,24 @@ if ( (fifoStatus == ICM_20948_Stat_Ok     ||
     current_roll_lpf = lpf(current_roll_lpf, current_roll_raw, LPF_BETA) - roll_bias;
     current_pitch_lpf = lpf(current_pitch_lpf, current_pitch_raw, LPF_BETA) - pitch_bias;
 
-   // ---------- TVC Limp Mode Logic ------------------------------
-   if (!tvc_in_limp_mode && (fabs(current_roll_lpf) > TVC_MAX_ANGLE_LIMIT || fabs(current_pitch_lpf) > TVC_MAX_ANGLE_LIMIT)) {
-     Serial.println("!!! TVC Entering LIMP MODE: Angle limit exceeded !!!");
-     tvc_in_limp_mode = true;
-     servoX.write(90);  // Go to neutral
-     servoY.write(90);
-     tvc_error_integral[0] = 0.0f;  // Reset PID state
-     tvc_error_integral[1] = 0.0f;
-     tvc_prev_error[0] = 0.0f;  // Reset previous error for D term
-     tvc_prev_error[1] = 0.0f;
-   }
+    // ---------- TVC Limp Mode Logic ------------------------------
+    if (!tvc_in_limp_mode && (fabs(current_roll_lpf) > TVC_MAX_ANGLE_LIMIT || fabs(current_pitch_lpf) > TVC_MAX_ANGLE_LIMIT)) {
+      Serial.println("!!! TVC Entering LIMP MODE: Angle limit exceeded !!!");
+      tvc_in_limp_mode = true;
+      servoX.write(90);  // Go to neutral
+      servoY.write(90);
+      tvc_error_integral[0] = 0.0f;  // Reset PID state
+      tvc_error_integral[1] = 0.0f;
+      tvc_prev_error[0] = 0.0f;  // Reset previous error for D term
+      tvc_prev_error[1] = 0.0f;
+    }
 
 
-   if (tvc_in_limp_mode && fabs(current_roll_lpf) < TVC_RESET_ANGLE_LIMIT && fabs(current_pitch_lpf) < TVC_RESET_ANGLE_LIMIT) {
-     Serial.println("TVC Exiting LIMP MODE: Angles back in range.");
-     tvc_in_limp_mode = false;
-     // PID state (integrals, prev_errors) will naturally rebuild on next active PID cycle
-   }
+    if (tvc_in_limp_mode && fabs(current_roll_lpf) < TVC_RESET_ANGLE_LIMIT && fabs(current_pitch_lpf) < TVC_RESET_ANGLE_LIMIT) {
+      Serial.println("TVC Exiting LIMP MODE: Angles back in range.");
+      tvc_in_limp_mode = false;
+      // PID state (integrals, prev_errors) will naturally rebuild on next active PID cycle
+    }
 
 
    // --- TVC PID Control ---
@@ -268,158 +288,164 @@ if ( (fifoStatus == ICM_20948_Stat_Ok     ||
 }
 void reactionWheelCycle(){
     // Consider if reaction wheel should also be affected by tvc_in_limp_mode
- if (!tvc_in_limp_mode && imu.dataReady()) {  // Only run RW PID if TVC is not in limp mode
-   imu.getAGMT();
-   float yawRate = imu.gyrZ();
-   float targetYawRate = 0.0f;
-   unsigned long current_rw_micros = micros();
-   float dt_rw = (prevTime_rw_micros == 0) ? TVC_TIME_STEP_TARGET : static_cast<float>(current_rw_micros - prevTime_rw_micros) * 1e-6f;
-   if (dt_rw <= 0.00001f) { dt_rw = TVC_TIME_STEP_TARGET; }
+  if (!tvc_in_limp_mode && imu.dataReady()) {  // Only run RW PID if TVC is not in limp mode
+    imu.getAGMT();
+    float yawRate = imu.gyrZ();
+    float targetYawRate = 0.0f;
+    unsigned long current_rw_micros = micros();
+    float dt_rw = (prevTime_rw_micros == 0) ? TVC_TIME_STEP_TARGET : static_cast<float>(current_rw_micros - prevTime_rw_micros) * 1e-6f;
+    if (dt_rw <= 0.00001f) { dt_rw = TVC_TIME_STEP_TARGET; }
 
-   current_yaw_lpf = lpf(current_yaw_lpf, yawRate, LPF_BETA);
-   rw_derivative = (current_yaw_lpf - past_yaw_lfp) / dt_rw;
-   rw_error_integral += (current_yaw_lpf + past_yaw_lfp) * dt_rw;
-   past_yaw_lfp = current_yaw_lpf;
+    current_yaw_lpf = lpf(current_yaw_lpf, yawRate, LPF_BETA);
+    rw_derivative = (current_yaw_lpf - past_yaw_lfp) / dt_rw;
+    rw_error_integral += (current_yaw_lpf + past_yaw_lfp) * dt_rw;
+    past_yaw_lfp = current_yaw_lpf;
 
-   // — 2) Reaction-wheel PID function —
-   float u = Kp_rw*current_yaw_lpf + Ki_rw*rw_error_integral + Kd_rw*rw_derivative;  // negative of the current yaw direction 
-   int pulse = constrain(1500 - int(u), 1000, 2000);
-   ledcWrite(reaction_wheel_pin, usToDuty(pulse));
+    // — 2) Reaction-wheel PID function —
+    float u = Kp_rw*current_yaw_lpf + Ki_rw*rw_error_integral + Kd_rw*rw_derivative;  // negative of the current yaw direction 
+    int pulse = constrain(1500 - int(u), 1000, 2000);
+    ledcWrite(reaction_wheel_pin, usToDuty(pulse));
 
 
- } else if (tvc_in_limp_mode) {
-   // If TVC is in limp mode, set reaction wheel to neutral for safety
-   ledcWrite(reaction_wheel_pin, usToDuty(1500));
-   // Serial.println("Reaction Wheel Neutral due to TVC Limp Mode.");
+  } else if (tvc_in_limp_mode) {
+    // If TVC is in limp mode, set reaction wheel to neutral for safety
+    ledcWrite(reaction_wheel_pin, usToDuty(1500));
+    // Serial.println("Reaction Wheel Neutral due to TVC Limp Mode.");
  }
 }
 
 
 void setup() {
-  pinMode( status_led_pin, OUTPUT); // Set GPIO 17 as an output pin
+  pinMode(status_led_pin, OUTPUT); // Set GPIO 17 as an output pin
 
- Serial.begin(115200);
- while (!Serial)
-   ;
- Serial.println("Setup starting...");
-
-
- SPI.begin(spi_sclk_pin, miso_pin, mosi_pin);
-
-
- Serial.println("Initializing IMU DMP...");
- while (imu.begin(icm20948_cs_pin, SPI) != ICM_20948_Stat_Ok) {
-   Serial.println("IMU.begin failed; retrying...");
-   delay(500);
- }
- if (imu.initializeDMP() != ICM_20948_Stat_Ok) {
-   Serial.println("FATAL: initializeDMP failed!");
-   while (1)
-     ;
- }
- if (imu.enableDMPSensor(INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR) != ICM_20948_Stat_Ok) {
-   Serial.println("FATAL: enableDMPSensor failed!");
-   while (1)
-     ;
- }
- if (imu.setDMPODRrate(DMP_ODR_Reg_Quat6, 1) != ICM_20948_Stat_Ok) {
-   Serial.println("FATAL: setDMPODRrate failed!");
-   while (1)
-     ;
- }
- if (imu.enableFIFO() != ICM_20948_Stat_Ok) {
-   Serial.println("FATAL: enableFIFO failed!");
-   while (1)
-     ;
- }
- if (imu.enableDMP() != ICM_20948_Stat_Ok) {
-   Serial.println("FATAL: enableDMP failed!");
-   while (1)
-     ;
- }
- if (imu.resetDMP() != ICM_20948_Stat_Ok) {
-   Serial.println("FATAL: resetDMP failed!");
-   while (1)
-     ;
- }
- if (imu.resetFIFO() != ICM_20948_Stat_Ok) {
-   Serial.println("FATAL: resetFIFO failed!");
-   while (1)
-     ;
- }
- Serial.println("ICM-20948 DMP ready.");
-
-
- // Calibrate bias axes (vertical stance)
- Serial.println("Calibrating biases... hold sensor vertical");
- constexpr int num_bias_sample = 200;
- float sum_r = 0, sum_y = 0;
- for(int i=0; i< num_bias_sample ; i++){
-   // 1) TVC control using DMP Game Rotation Vector
-  icm_20948_DMP_data_t dmp_data;
-  if (imu.readDMPdataFromFIFO(&dmp_data) == ICM_20948_Stat_Ok && (dmp_data.header & DMP_header_bitmap_Quat6))
-  {
-    double q1 = static_cast<double>(dmp_data.Quat6.Data.Q1) / 1073741824.0; // X-axis rotation component
-    double q2 = static_cast<double>(dmp_data.Quat6.Data.Q2) / 1073741824.0; // Y-axis rotation component
-    double q3 = static_cast<double>(dmp_data.Quat6.Data.Q3) / 1073741824.0; // Z-axis rotation component
-
-    double q_sum_sq = q1 * q1 + q2 * q2 + q3 * q3;
-    double q0 = (q_sum_sq < 1.0) ? sqrt(1.0 - q_sum_sq) : 0.0;
-
-    // Apply quaternion correction for 90-degree rotation around Y-axis
-    const double sqrt2_over_2 = sqrt(2.0) / 2.0;
-    double q0_corrected = sqrt2_over_2 * (q0 + q2);
-    double q1_corrected = sqrt2_over_2 * (q1 - q3);
-    double q2_corrected = sqrt2_over_2 * (q2 - q0);
-    double q3_corrected = sqrt2_over_2 * (q3 - q1);
-
-    // Use corrected quaternions for Euler angle conversion
-    // Roll (around IMU X-axis / vehicle's longitudinal axis)
-    double t0_roll = 2.0 * (q0_corrected * q1_corrected + q2_corrected * q3_corrected);
-    double t1_roll = 1.0 - 2.0 * (q1_corrected * q1_corrected + q2_corrected * q2_corrected);
-    float current_roll_raw = atan2(t0_roll, t1_roll) * (180.0 / PI);
-
-    // Pitch (around IMU Y-axis / vehicle's transverse axis)
-    double t2_pitch = (2.0 * (q0_corrected * q2_corrected - q3_corrected * q1_corrected))*-1.0;
-    if (t2_pitch > 1.0)
-      t2_pitch = 1.0;
-    if (t2_pitch < -1.0)
-      t2_pitch = -1.0;
-    float current_pitch_raw = asin(t2_pitch) * (180.0 / PI);
-
-    current_roll_lpf = lpf(current_roll_lpf, current_roll_raw, lpf_beta);
-    current_pitch_lpf = lpf(current_pitch_lpf, current_pitch_raw, lpf_beta);
+  Serial.begin(115200);
+  while (!Serial) Serial.println("Setup starting...");
+  SPI.begin(spi_sclk_pin, miso_pin, mosi_pin);
+  
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW init failed");
+    return;
   }
-   delay(10);
- }
- roll_bias = sum_r/num_bias_sample;
- pitch_bias  = sum_y/num_bias_sample;
- Serial.printf("Biases: roll=%.1f°, yaw=%.1f°\n", roll_bias, pitch_bias);
-
- servoX.setPeriodHertz(50);
- servoY.setPeriodHertz(50);
- servoX.attach(servo_x_pin, 500, 2400);
- servoY.attach(servo_y_pin, 500, 2400);
- servoX.write(90);
- servoY.write(90);
-
- leg_servo.setPeriodHertz(50);
- leg_servo.attach(leg_servo_pin, 500, 2400);
-
- ledcAttach(reaction_wheel_pin, reaction_wheel_freq, reaction_wheel_resolution );
- ledcAttach(leg_servo_pin, 50, 16);
- Serial.println("Arming Reaction Wheel ESC: Sending 1500us. Please wait ~5 seconds...");
- ledcWrite(reaction_wheel_pin, usToDuty(1500));
- delay(5000);
- Serial.println("ESC presumed armed.");
 
 
- tvc_prev_time_micros = micros();
- rw_prev_time_micros  = micros();
+  // Initiate Comms
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, ground_station, sizeof(ground_station));
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
 
- trigger_time = 3000 + millis();
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add peer");
+    return;
+  }
 
- Serial.println("Setup complete.");
+  Serial.println("Initializing IMU DMP...");
+  while (imu.begin(icm20948_cs_pin, SPI) != ICM_20948_Stat_Ok) {
+    Serial.println("IMU.begin failed; retrying...");
+    delay(500);
+  }
+  if (imu.initializeDMP() != ICM_20948_Stat_Ok) {
+    Serial.println("FATAL: initializeDMP failed!");
+    while (1);
+  }
+  if (imu.enableDMPSensor(INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR) != ICM_20948_Stat_Ok) {
+    Serial.println("FATAL: enableDMPSensor failed!");
+    while (1);
+  }
+  if (imu.setDMPODRrate(DMP_ODR_Reg_Quat6, 1) != ICM_20948_Stat_Ok) {
+    Serial.println("FATAL: setDMPODRrate failed!");
+    while (1);
+  }
+  if (imu.enableFIFO() != ICM_20948_Stat_Ok) {
+    Serial.println("FATAL: enableFIFO failed!");
+    while (1);
+  }
+  if (imu.enableDMP() != ICM_20948_Stat_Ok) {
+    Serial.println("FATAL: enableDMP failed!");
+    while (1);
+  }
+  if (imu.resetDMP() != ICM_20948_Stat_Ok) {
+    Serial.println("FATAL: resetDMP failed!");
+    while (1);
+  }
+  if (imu.resetFIFO() != ICM_20948_Stat_Ok) {
+    Serial.println("FATAL: resetFIFO failed!");
+    while (1);
+  }
+  Serial.println("ICM-20948 DMP ready.");
+
+
+  // Calibrate bias axes (vertical stance)
+  Serial.println("Calibrating biases... hold sensor vertical");
+  constexpr int num_bias_sample = 200;
+  float sum_r = 0, sum_y = 0;
+  for(int i=0; i< num_bias_sample ; i++){
+    // 1) TVC control using DMP Game Rotation Vector
+    icm_20948_DMP_data_t dmp_data;
+    if (imu.readDMPdataFromFIFO(&dmp_data) == ICM_20948_Stat_Ok && (dmp_data.header & DMP_header_bitmap_Quat6))
+    {
+      double q1 = static_cast<double>(dmp_data.Quat6.Data.Q1) / 1073741824.0; // X-axis rotation component
+      double q2 = static_cast<double>(dmp_data.Quat6.Data.Q2) / 1073741824.0; // Y-axis rotation component
+      double q3 = static_cast<double>(dmp_data.Quat6.Data.Q3) / 1073741824.0; // Z-axis rotation component
+
+      double q_sum_sq = q1 * q1 + q2 * q2 + q3 * q3;
+      double q0 = (q_sum_sq < 1.0) ? sqrt(1.0 - q_sum_sq) : 0.0;
+
+      // Apply quaternion correction for 90-degree rotation around Y-axis
+      const double sqrt2_over_2 = sqrt(2.0) / 2.0;
+      double q0_corrected = sqrt2_over_2 * (q0 + q2);
+      double q1_corrected = sqrt2_over_2 * (q1 - q3);
+      double q2_corrected = sqrt2_over_2 * (q2 - q0);
+      double q3_corrected = sqrt2_over_2 * (q3 - q1);
+
+      // Use corrected quaternions for Euler angle conversion
+      // Roll (around IMU X-axis / vehicle's longitudinal axis)
+      double t0_roll = 2.0 * (q0_corrected * q1_corrected + q2_corrected * q3_corrected);
+      double t1_roll = 1.0 - 2.0 * (q1_corrected * q1_corrected + q2_corrected * q2_corrected);
+      float current_roll_raw = atan2(t0_roll, t1_roll) * (180.0 / PI);
+
+      // Pitch (around IMU Y-axis / vehicle's transverse axis)
+      double t2_pitch = (2.0 * (q0_corrected * q2_corrected - q3_corrected * q1_corrected))*-1.0;
+      if (t2_pitch > 1.0)
+        t2_pitch = 1.0;
+      if (t2_pitch < -1.0)
+        t2_pitch = -1.0;
+      float current_pitch_raw = asin(t2_pitch) * (180.0 / PI);
+
+      current_roll_lpf = lpf(current_roll_lpf, current_roll_raw, lpf_beta);
+      current_pitch_lpf = lpf(current_pitch_lpf, current_pitch_raw, lpf_beta);
+    }
+    delay(10);
+  }
+  roll_bias = sum_r/num_bias_sample;
+  pitch_bias  = sum_y/num_bias_sample;
+  Serial.printf("Biases: roll=%.1f°, yaw=%.1f°\n", roll_bias, pitch_bias);
+
+  servoX.setPeriodHertz(50);
+  servoY.setPeriodHertz(50);
+  servoX.attach(servo_x_pin, 500, 2400);
+  servoY.attach(servo_y_pin, 500, 2400);
+  servoX.write(90);
+  servoY.write(90);
+
+  leg_servo.setPeriodHertz(50);
+  leg_servo.attach(leg_servo_pin, 500, 2400);
+
+  ledcAttach(reaction_wheel_pin, reaction_wheel_freq, reaction_wheel_resolution );
+  ledcAttach(leg_servo_pin, 50, 16);
+  Serial.println("Arming Reaction Wheel ESC: Sending 1500us. Please wait ~5 seconds...");
+  ledcWrite(reaction_wheel_pin, usToDuty(1500));
+  delay(5000);
+  Serial.println("ESC presumed armed.");
+
+
+  tvc_prev_time_micros = micros();
+  rw_prev_time_micros  = micros();
+
+  trigger_time = 3000 + millis();
+
+  Serial.println("Setup complete.");
 }
 
 float prevAltitude = 0;
