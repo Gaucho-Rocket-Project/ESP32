@@ -17,6 +17,13 @@ constexpr int miso_pin 19;
 constexpr int mosi_pin 23;
 constexpr int icm20948_cs_pin 5;  // Chip‐select for ICM-20948
 
+// --- Main Loop Timing ---
+static int stage = 0;
+static unsigned long burn1Start = 0;
+static float apogeeAltitude = 0;
+static unsigned long apogeeDetectedTime = 0;
+static bool burn2Triggered = false;
+
 
 constexpr int status_led_pin = 17;
 
@@ -464,12 +471,6 @@ float getAltitude() {
 
 
 void loop() {
-
-    static int stage = 0;
-    static unsigned long burn1Start = 0;
-    static float apogeeAltitude = 0;
-    static unsigned long apogeeDetectedTime = 0;
-    static bool burn2Triggered = false;
 
     // Read IMU always
     readIMU();
