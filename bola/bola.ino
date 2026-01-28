@@ -104,9 +104,6 @@ unsigned long last_motor_time = 0,
              motor_interval = 1000;  // ms between motor triggers
 
 
-//
-
-
 //COMMUNICATION FUNCTIONS:
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   Serial.print("Send Status: ");
@@ -334,6 +331,14 @@ void setup() {
   memcpy(peerInfo.peer_addr, ground_station, sizeof(ground_station));
   peerInfo.channel = 0;
   peerInfo.encrypt = false;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add peer");
+    return;
+  }
+
+  esp_now_register_recv_cb(onDataRecv);
+  esp_now_register_send_cb(onDataSent);
 
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
     Serial.println("Failed to add peer");
