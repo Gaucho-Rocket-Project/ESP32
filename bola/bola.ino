@@ -19,10 +19,11 @@ constexpr int icm20948_cs_pin 5;  // Chip‐select for ICM-20948
 
 // --- Main Loop Timing ---
 static int stage = 0;
-static unsigned long burn1Start = 0;
+static unsigned long burn1End = 0;
 static float apogeeAltitude = 0;
 static unsigned long apogeeDetectedTime = 0;
 static bool burn2Triggered = false;
+static float velocity = 0;
 
 
 constexpr int status_led_pin = 17;
@@ -78,7 +79,7 @@ bool tvc_in_limp_mode = false;
 // --- IMU object ---
 ICM_20948_SPI imu;
 
-// --- IMU data ---
+// --- IMU data --- [x, y, z]
 struct imu_data{
   int16_t acceleration[3];
   float euler_angles[3];
@@ -475,13 +476,15 @@ void loop() {
     // Read IMU always
     readIMU();
 
+    //Reaction Wheel always
+    reactionWheelCycle();
+
     // ------- UPDATE ALTITUDE + VELOCITY ------
     unsigned long tNow = millis();
     static unsigned long lastAltitudeTime = millis();
     float dt = (tNow - lastAltitudeTime) / 1000.0f;
     float altitude = getAltitude();
     static float prevAltitude = altitude;
-    static float velocity = 0;
 
     if(dt > 0.02f) {
         velocity = (altitude - prevAltitude) / dt;
@@ -496,7 +499,8 @@ void loop() {
         case 0: // Pre-launch
             // Wait for a command or automatically start Burn 1
             Serial.println("Stage 0: Awaiting launch...");
-            burn1Start = millis();
+            //add wait command
+            //start engine 1
             stage = 1; 
         break;
 
@@ -505,9 +509,11 @@ void loop() {
             tvcCycle();    
             Serial.println("Stage 1: Burn 1 running...");
 
-            if(millis() - burn1Start >= 3500) {  // 3.5 sec burn
-                Serial.println("Burn 1 complete.");
-                stage = 2;
+            // find when vertical acceleration is -1g
+            if (data.acceleration[2] <= 10) {// MAKE SURE TO CHECK ORIENTATION also later on need to test value for gravity
+              burn1End = millis();
+              Serial.println("Burn 1 complete");
+              stage = 2;
             }
         break;
 
@@ -527,10 +533,9 @@ void loop() {
         case 3: // COMPUTE WAIT TIME FOR SECOND BURN
             Serial.println("Stage 3: Calculating timing for burn 2...");
 
-            // *** Placeholder physics: replace with algorithm ***
-            unsigned long burn2Delay = 2000;  // Example: fire 2 seconds after apogee
+            unsigned long burn2Delay = 100;  // Example: delay it takes for the fuse to light the engine 
 
-            if(millis() - apogeeDetectedTime >= burn2Delay) {
+            if(millis() >= apogeeDetectedTime + (apogeeDetectedTime - burn1End) - burn2Delay) {
                 Serial.println("Firing second burn...");
                 burn2Triggered = true;
                 stage = 4;
