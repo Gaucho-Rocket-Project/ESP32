@@ -2,20 +2,17 @@
 #include <ESP32Servo.h>
 #include "ICM_20948.h"
 #include <cmath>
-#include <iostream>
-#include <utility>
-#include <vector>
 #include <array>  // added for lookup table
-#include "BluetoothSerial.h"
-#include <Wifi.h>
+// #include "BluetoothSerial.h"
+#include <WiFi.h>
 #include <Wire.h>
 #include <esp_now.h>
 
 // --- SPI pins for VSPI (default) ---
-constexpr int spi_sclk_pin 18;
-constexpr int miso_pin 19;
-constexpr int mosi_pin 23;
-constexpr int icm20948_cs_pin 5;  // Chip‐select for ICM-20948
+constexpr int spi_sclk_pin = 18;
+constexpr int miso_pin = 19;
+constexpr int mosi_pin = 23;
+constexpr int icm20948_cs_pin = 5;  // Chip‐select for ICM-20948
 
 // --- Main Loop Timing ---
 static int stage = 0;
@@ -33,7 +30,6 @@ constexpr int reaction_wheel_pin = 0;
 constexpr int reaction_wheel_freq = 50;  // 50 Hz for typical ESC PWM
 constexpr int reaction_wheel_resolution  = 16;   // 16-bit PWM resolution
 
-
 // --- TVC servos on two GPIOs ---
 Servo servoX, servoY;
 constexpr int servo_x_pin = 33;
@@ -46,7 +42,6 @@ bool legs_triggered = false;
 
 int trigger_time;
 
-
 // --- PID constants for reaction wheel (yaw rate) ---
 constexpr float  Kp_rw = 3.3125f, Ki_rw = 0.2f, Kd_rw = 1.3f;
 float prevError_rw = 0.0f, integral_rw = 0.0f;
@@ -57,9 +52,9 @@ unsigned long rw_prev_time_micros  = 0;
 constexpr float Kp_tvc = 1.5f;
 constexpr float Ki_tvc = 0.1f;
 constexpr float Kd_tvc = 0.05f;  // START VERY LOW (e.g., 0.0) AND TUNE UP
-constexpr float tvc_time_step_target = 0.01f;
+constexpr float TVC_TIME_STEP_TARGET = 0.01f;
 constexpr float tvc_deadzone = 1.0f;
-constexpr float lpf_beta = 0.2f;
+constexpr float LPF_BETA = 0.2f;
 
 
 // Variables for the LPF-based TVC PID
@@ -71,8 +66,8 @@ unsigned long tvc_prev_time_micros = 0;
 
 
 // TVC Limp Mode (Shutdown)
-constexpr float tvc_max_angle_limit = 45.0f;    // Max filtered angle before TVC enters limp mode
-constexpr float tvc_reset_angle_limit = 35.0f;  // Angle below which TVC can exit limp mode
+constexpr float TVC_MAX_ANGLE_LIMIT = 45.0f;    // Max filtered angle before TVC enters limp mode
+constexpr float TVC_RESET_ANGLE_LIMIT = 35.0f;  // Angle below which TVC can exit limp mode
 bool tvc_in_limp_mode = false;
 
 
@@ -85,21 +80,19 @@ struct imu_data{
   float euler_angles[3];
   uint8_t pressure[3];
   uint8_t temperature[3];
+  int isValid;
 } data;
-
-
 
 // --- Bias offsets ---
 float roll_bias = 0, pitch_bias = 0;
 
-
 // Bluetooth
-BluetoothSerial SerialBT;
-char bt_Cmd;
-bool launch_sequence = false;  // main logic flag
+// BluetoothSerial SerialBT;
+// char bt_Cmd;
+// bool launch_sequence = false;  // main logic flag
 
 //ESP-NOW
-unint8_t ground_station[6] = {0x7C, 0x9E, 0xBD, 0x12, 0x34, 0x56}; //dummy address
+uint8_t ground_station[6] = {0x7C, 0x9E, 0xBD, 0x12, 0x34, 0x56}; //dummy address
 
 
 // MoI Consts
@@ -113,24 +106,25 @@ unsigned long last_motor_time = 0,
 
 
 //COMMUNICATION FUNCTIONS:
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+void onDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
   Serial.print("Send Status: ");
   Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
 }
 
-void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len){
-  if(*mac == ground_station && len >= 1){
-    esp_now_send(receiverAddress, (uint8_t *)&data, sizeof(data));
+void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len){
+  const uint8_t *mac = info->src_addr;
+  if(memcmp(mac, ground_station, 6) == 0 && len >= 1){
+    esp_now_send(ground_station, (uint8_t *)&data, sizeof(data));
   } 
 }
 
 void readIMU() {
   icm_20948_DMP_data_t dmp_data;
-  if(imu.readDMPDataFromFIFO(&dmp_data) == ICM_20948_Stat_Ok){
+  if(imu.readDMPdataFromFIFO(&dmp_data) == ICM_20948_Stat_Ok){
     if(dmp_data.header == DMP_header_bitmap_Accel){
-      data.acceleration[0] = dmp_data.Raw_Accel.X;
-      data.acceleration[1] = dmp_data.Raw_Accel.Y;
-      data.acceleration[2] = dmp_data.Raw_Accel.Z;
+      data.acceleration[0] = dmp_data.Raw_Accel.Data.X;
+      data.acceleration[1] = dmp_data.Raw_Accel.Data.Y;
+      data.acceleration[2] = dmp_data.Raw_Accel.Data.Z;
     }
     else if(dmp_data.header == DMP_header_bitmap_Quat6){
       double q1 = static_cast<double>(dmp_data.Quat6.Data.Q1) / 1073741824.0;  // X-axis rotation component
@@ -164,6 +158,7 @@ void readIMU() {
       memcpy(data.pressure, dmp_data.Pressure, 3);
       memcpy(data.temperature, dmp_data.Pressure+3, 3);
     }
+    data.isValid = 1;
   }
 }
 
@@ -171,46 +166,24 @@ void readIMU() {
 //ACTION FUNCTIONS:
 
 void triggerLegs(){
-    ledcWrite(leg_pin, usToDuty(1500));
+    // ledcWrite(leg_pin, usToDuty(1500));
 }
-void triggerMotor(){
-  // e.g. ledcWrite(reaction_wheel_pin, usToDuty(2000));
- Serial.println("Trigger motor and legs");
-}
+// void triggerMotor(){
+//   // e.g. ledcWrite(reaction_wheel_pin, usToDuty(2000));
+//  Serial.println("Trigger motor and legs");
+// }
 void tvcCycle(){
     // 1) TVC control using DMP Game Rotation Vector
-  icm_20948_DMP_data_t dmp_data;
- 
-  ICM_20948_Status_e fifoStatus = imu.readDMPdataFromFIFO(&dmp_data);
 
-  if ( (fifoStatus == ICM_20948_Stat_Ok     || 
-        fifoStatus == ICM_20948_Stat_FIFOMoreDataAvail) &&
-      (dmp_data.header & DMP_header_bitmap_Quat6) ) {
-    double q1 = static_cast<double>(dmp_data.Quat6.Data.Q1) / 1073741824.0;  // X-axis rotation component
-    double q2 = static_cast<double>(dmp_data.Quat6.Data.Q2) / 1073741824.0;  // Y-axis rotation component
-    double q3 = static_cast<double>(dmp_data.Quat6.Data.Q3) / 1073741824.0;  // Z-axis rotation component
-
-
-    double q_sum_sq = q1 * q1 + q2 * q2 + q3 * q3;
-    double q0 = (q_sum_sq < 1.0) ? sqrt(1.0 - q_sum_sq) : 0.0;
-
-
-    // ---- CHOOSE AND USE ONLY ONE EULER ANGLE CONVERSION ----
-    // Standard Euler Angle Convention (Confirm your IMU axis mapping to Roll/Pitch vehicle axes)
-    // Roll (around IMU X-axis / vehicle's longitudinal axis)
-    double t0_roll = 2.0 * (q0 * q1 + q2 * q3);
-    double t1_roll = 1.0 - 2.0 * (q1 * q1 + q2 * q2);
-    float current_roll_raw = atan2(t0_roll, t1_roll) * (180.0 / PI) + 90;
-
-
-    // Pitch (around IMU Y-axis)
-    double t2_pitch = (2.0 * (q0 * q2 - q3 * q1))*-1.0;
-    t2_pitch = constrain(t2_pitch, -1.0, 1.0);
-    float current_pitch_raw = asin(t2_pitch) * (180.0 / PI);
-    // ---- END OF EULER ANGLE CONVERSION ----
-
-    current_roll_lpf = lpf(current_roll_lpf, current_roll_raw, LPF_BETA) - roll_bias;
-    current_pitch_lpf = lpf(current_pitch_lpf, current_pitch_raw, LPF_BETA) - pitch_bias;
+  if (data.isValid) {
+    
+    //temporarily removed lpf functionality but may need to add back in?
+    current_roll_lpf = data.euler_angles[0];
+    current_pitch_lpf = data.euler_angles[1];
+    // current_yaw_lpf = data.euler_angles[2];
+    
+    // current_roll_lpf = lpf(current_roll_lpf, current_roll_raw, LPF_BETA) - roll_bias;
+    // current_pitch_lpf = lpf(current_pitch_lpf, current_pitch_raw, LPF_BETA) - pitch_bias;
 
     // ---------- TVC Limp Mode Logic ------------------------------
     if (!tvc_in_limp_mode && (fabs(current_roll_lpf) > TVC_MAX_ANGLE_LIMIT || fabs(current_pitch_lpf) > TVC_MAX_ANGLE_LIMIT)) {
@@ -291,37 +264,38 @@ void tvcCycle(){
  }  // End of DMP data processing
 
 }
-void reactionWheelCycle(){
-    // Consider if reaction wheel should also be affected by tvc_in_limp_mode
-  if (!tvc_in_limp_mode && imu.dataReady()) {  // Only run RW PID if TVC is not in limp mode
-    imu.getAGMT();
-    float yawRate = imu.gyrZ();
-    float targetYawRate = 0.0f;
-    unsigned long current_rw_micros = micros();
-    float dt_rw = (prevTime_rw_micros == 0) ? TVC_TIME_STEP_TARGET : static_cast<float>(current_rw_micros - prevTime_rw_micros) * 1e-6f;
-    if (dt_rw <= 0.00001f) { dt_rw = TVC_TIME_STEP_TARGET; }
+// void reactionWheelCycle(){
+//     // Consider if reaction wheel should also be affected by tvc_in_limp_mode
+//   if (!tvc_in_limp_mode && imu.dataReady()) {  // Only run RW PID if TVC is not in limp mode
+//     imu.getAGMT();
+//     float yawRate = imu.gyrZ();
+//     float targetYawRate = 0.0f;
+//     unsigned long current_rw_micros = micros();
+//     float dt_rw = (prevTime_rw_micros == 0) ? TVC_TIME_STEP_TARGET : static_cast<float>(current_rw_micros - prevTime_rw_micros) * 1e-6f;
+//     if (dt_rw <= 0.00001f) { dt_rw = TVC_TIME_STEP_TARGET; }
 
-    current_yaw_lpf = lpf(current_yaw_lpf, yawRate, LPF_BETA);
-    rw_derivative = (current_yaw_lpf - past_yaw_lfp) / dt_rw;
-    rw_error_integral += (current_yaw_lpf + past_yaw_lfp) * dt_rw;
-    past_yaw_lfp = current_yaw_lpf;
+//     current_yaw_lpf = lpf(current_yaw_lpf, yawRate, LPF_BETA);
+//     rw_derivative = (current_yaw_lpf - past_yaw_lfp) / dt_rw;
+//     rw_error_integral += (current_yaw_lpf + past_yaw_lfp) * dt_rw;
+//     past_yaw_lfp = current_yaw_lpf;
 
-    // — 2) Reaction-wheel PID function —
-    float u = Kp_rw*current_yaw_lpf + Ki_rw*rw_error_integral + Kd_rw*rw_derivative;  // negative of the current yaw direction 
-    int pulse = constrain(1500 - int(u), 1000, 2000);
-    ledcWrite(reaction_wheel_pin, usToDuty(pulse));
+//     // — 2) Reaction-wheel PID function —
+//     float u = Kp_rw*current_yaw_lpf + Ki_rw*rw_error_integral + Kd_rw*rw_derivative;  // negative of the current yaw direction 
+//     int pulse = constrain(1500 - int(u), 1000, 2000);
+//     ledcWrite(reaction_wheel_pin, usToDuty(pulse));
 
 
-  } else if (tvc_in_limp_mode) {
-    // If TVC is in limp mode, set reaction wheel to neutral for safety
-    ledcWrite(reaction_wheel_pin, usToDuty(1500));
-    // Serial.println("Reaction Wheel Neutral due to TVC Limp Mode.");
- }
-}
+//   } else if (tvc_in_limp_mode) {
+//     // If TVC is in limp mode, set reaction wheel to neutral for safety
+//     ledcWrite(reaction_wheel_pin, usToDuty(1500));
+//     // Serial.println("Reaction Wheel Neutral due to TVC Limp Mode.");
+//  }
+// }
 
 
 void setup() {
   pinMode(status_led_pin, OUTPUT); // Set GPIO 17 as an output pin
+  data.isValid = 0;
 
   Serial.begin(115200);
   while (!Serial) Serial.println("Setup starting...");
@@ -394,41 +368,16 @@ void setup() {
   constexpr int num_bias_sample = 200;
   float sum_r = 0, sum_y = 0;
   for(int i=0; i< num_bias_sample ; i++){
-    // 1) TVC control using DMP Game Rotation Vector
-    icm_20948_DMP_data_t dmp_data;
-    if (imu.readDMPdataFromFIFO(&dmp_data) == ICM_20948_Stat_Ok && (dmp_data.header & DMP_header_bitmap_Quat6))
-    {
-      double q1 = static_cast<double>(dmp_data.Quat6.Data.Q1) / 1073741824.0; // X-axis rotation component
-      double q2 = static_cast<double>(dmp_data.Quat6.Data.Q2) / 1073741824.0; // Y-axis rotation component
-      double q3 = static_cast<double>(dmp_data.Quat6.Data.Q3) / 1073741824.0; // Z-axis rotation component
+    readIMU();
+    float current_roll_raw = data.euler_angles[0];
+    float current_pitch_raw = data.euler_angles[1];
 
-      double q_sum_sq = q1 * q1 + q2 * q2 + q3 * q3;
-      double q0 = (q_sum_sq < 1.0) ? sqrt(1.0 - q_sum_sq) : 0.0;
+    current_roll_lpf = current_roll_raw;
+    current_pitch_lpf = current_pitch_raw;
 
-      // Apply quaternion correction for 90-degree rotation around Y-axis
-      const double sqrt2_over_2 = sqrt(2.0) / 2.0;
-      double q0_corrected = sqrt2_over_2 * (q0 + q2);
-      double q1_corrected = sqrt2_over_2 * (q1 - q3);
-      double q2_corrected = sqrt2_over_2 * (q2 - q0);
-      double q3_corrected = sqrt2_over_2 * (q3 - q1);
-
-      // Use corrected quaternions for Euler angle conversion
-      // Roll (around IMU X-axis / vehicle's longitudinal axis)
-      double t0_roll = 2.0 * (q0_corrected * q1_corrected + q2_corrected * q3_corrected);
-      double t1_roll = 1.0 - 2.0 * (q1_corrected * q1_corrected + q2_corrected * q2_corrected);
-      float current_roll_raw = atan2(t0_roll, t1_roll) * (180.0 / PI);
-
-      // Pitch (around IMU Y-axis / vehicle's transverse axis)
-      double t2_pitch = (2.0 * (q0_corrected * q2_corrected - q3_corrected * q1_corrected))*-1.0;
-      if (t2_pitch > 1.0)
-        t2_pitch = 1.0;
-      if (t2_pitch < -1.0)
-        t2_pitch = -1.0;
-      float current_pitch_raw = asin(t2_pitch) * (180.0 / PI);
-
-      current_roll_lpf = lpf(current_roll_lpf, current_roll_raw, lpf_beta);
-      current_pitch_lpf = lpf(current_pitch_lpf, current_pitch_raw, lpf_beta);
-    }
+    //need to look into lpf
+    // current_roll_lpf = lpf(current_roll_lpf, current_roll_raw, lpf_beta);
+    // current_pitch_lpf = lpf(current_pitch_lpf, current_pitch_raw, lpf_beta);
     delay(10);
   }
   roll_bias = sum_r/num_bias_sample;
@@ -448,7 +397,7 @@ void setup() {
   ledcAttach(reaction_wheel_pin, reaction_wheel_freq, reaction_wheel_resolution );
   ledcAttach(leg_servo_pin, 50, 16);
   Serial.println("Arming Reaction Wheel ESC: Sending 1500us. Please wait ~5 seconds...");
-  ledcWrite(reaction_wheel_pin, usToDuty(1500));
+  // ledcWrite(reaction_wheel_pin, usToDuty(1500));
   delay(5000);
   Serial.println("ESC presumed armed.");
 
@@ -467,7 +416,7 @@ unsigned long lastAltitudeTime = 0;
 
 float getAltitude() {
     // return converted pressure data OR test constant for dummy; placeholder below:
-    return (float)pressure[0]; // FIX later
+    return (float)data.pressure[0]; // FIX later
 }
 
 
@@ -485,6 +434,8 @@ void loop() {
     float dt = (tNow - lastAltitudeTime) / 1000.0f;
     float altitude = getAltitude();
     static float prevAltitude = altitude;
+    static float velocity = 0;
+    unsigned long burn2Delay = 2000;
 
     if(dt > 0.02f) {
         velocity = (altitude - prevAltitude) / dt;
@@ -533,7 +484,9 @@ void loop() {
         case 3: // COMPUTE WAIT TIME FOR SECOND BURN
             Serial.println("Stage 3: Calculating timing for burn 2...");
 
-            unsigned long burn2Delay = 100;  // Example: delay it takes for the fuse to light the engine 
+            // *** Placeholder physics: replace with algorithm ***
+            // unsigned long burn2Delay = 2000;  // Example: fire 2 seconds after apogee
+            // do not declare and initialize variable inside switch blocks
 
             if(millis() >= apogeeDetectedTime + (apogeeDetectedTime - burn1End) - burn2Delay) {
                 Serial.println("Firing second burn...");
